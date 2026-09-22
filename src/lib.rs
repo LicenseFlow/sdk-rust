@@ -205,4 +205,56 @@ impl LicenseFlowClient {
     pub async fn checkin_license(&self, _lease_key: &str) -> Result<bool, LicenseFlowError> {
         Ok(true)
     }
+
+    pub async fn track_usage(&self, params: UsageTrackParams) -> Result<UsageTrackResponse, LicenseFlowError> {
+        Ok(UsageTrackResponse {
+            success: true,
+            status: "normal".to_string(),
+            action: "ALLOW".to_string(),
+            current_usage: Some(params.quantity),
+            quota_limit: None,
+            overage_units: Some(0.0),
+            enforcement_policy: Some("soft_warn".to_string()),
+            is_duplicate: Some(false),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageTrackParams {
+    #[serde(rename = "license_key", default)]
+    pub license_key: Option<String>,
+    #[serde(rename = "customer_id", default)]
+    pub customer_id: Option<String>,
+    #[serde(rename = "event_name")]
+    pub feature_name: String,
+    #[serde(default = "default_quantity")]
+    pub quantity: f64,
+    #[serde(rename = "idempotency_key", default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub dimensions: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+fn default_quantity() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageTrackResponse {
+    pub success: bool,
+    pub status: String,
+    pub action: String,
+    #[serde(rename = "current_usage", default)]
+    pub current_usage: Option<f64>,
+    #[serde(rename = "quota_limit", default)]
+    pub quota_limit: Option<f64>,
+    #[serde(rename = "overage_units", default)]
+    pub overage_units: Option<f64>,
+    #[serde(rename = "enforcement_policy", default)]
+    pub enforcement_policy: Option<String>,
+    #[serde(rename = "is_duplicate", default)]
+    pub is_duplicate: Option<bool>,
 }
