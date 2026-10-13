@@ -1,6 +1,6 @@
 [package]
 name = "licenseflow"
-version = "2.1.0"
+version = "2.3.0"
 edition = "2021"
 description = "Official Rust SDK for the LicenseFlow software licensing & entitlement data plane"
 license = "MIT OR Apache-2.0"
