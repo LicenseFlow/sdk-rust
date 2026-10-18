@@ -397,6 +397,51 @@ impl LicenseFlowClient {
         }
     }
 
+    /// Background real-time revocation listener updating local memory cache
+    pub fn stream_revocations(&self, poll_interval: Duration) -> tokio::task::JoinHandle<()> {
+        let subs = Arc::clone(&self.revoked_subjects);
+        let lics = Arc::clone(&self.revoked_licenses);
+        let tls = Arc::clone(&self.revoked_tools);
+        let base_url = self.config.base_url.clone();
+        let api_key = self.config.api_key.clone();
+
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let url = format!("{}/functions/v1/v1-stream-revocations", base_url.trim_end_matches('/'));
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                if let Ok(res) = client.get(&url).header("Authorization", format!("Bearer {}", api_key)).send().await {
+                    if let Ok(data) = res.json::<serde_json::Value>().await {
+                        if let Some(events) = data.get("events").and_then(|e| e.as_array()) {
+                            for ev in events {
+                                let ev_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                let identifier = ev.get("identifier").and_then(|i| i.as_str()).unwrap_or("");
+                                let reason = ev.get("reason").and_then(|r| r.as_str()).unwrap_or("Emergency revocation");
+                                match ev_type {
+                                    "license" => {
+                                        if let Ok(mut l) = lics.write() {
+                                            l.insert(identifier.to_string(), reason.to_string());
+                                        }
+                                    }
+                                    "tool" => {
+                                        if let Ok(mut t) = tls.write() {
+                                            t.insert(identifier.to_string(), reason.to_string());
+                                        }
+                                    }
+                                    _ => {
+                                        if let Ok(mut s) = subs.write() {
+                                            s.insert(identifier.to_string(), reason.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Cross-plane authorization helper directly binding Core license rights
     pub async fn authorize_with_license(
         &self,
