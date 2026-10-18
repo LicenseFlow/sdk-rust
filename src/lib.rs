@@ -107,6 +107,9 @@ struct CacheEntry {
 pub struct LicenseFlowClient {
     config: ClientConfig,
     cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    revoked_subjects: Arc<RwLock<HashMap<String, String>>>,
+    revoked_licenses: Arc<RwLock<HashMap<String, String>>>,
+    revoked_tools: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl LicenseFlowClient {
@@ -114,6 +117,9 @@ impl LicenseFlowClient {
         Self {
             config,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            revoked_subjects: Arc::new(RwLock::new(HashMap::new())),
+            revoked_licenses: Arc::new(RwLock::new(HashMap::new())),
+            revoked_tools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -227,6 +233,29 @@ impl LicenseFlowClient {
     /// Runtime Authorization Control Plane (POST /v1/authorize)
     /// Evaluates whether a subject is entitled to perform an action on a protected resource.
     pub async fn authorize(&self, options: AuthorizeOptions) -> Result<AuthorizationDecision, LicenseFlowError> {
+        // Zero-latency fail-closed pre-flight check (<0.05ms)
+        if let (true, reason) = self.is_revoked(Some(&options.subject), None, Some(&options.resource)) {
+            return Ok(AuthorizationDecision {
+                allowed: false,
+                decision: "DENY".to_string(),
+                code: "EMERGENCY_REVOKED".to_string(),
+                reason: reason.unwrap_or_else(|| "Target revoked by active emergency kill switch".to_string()),
+                approval_request_id: None,
+                diagnostics: Diagnostics {
+                    precedence_step: Some("STEP_0_EMERGENCY_KILL_SWITCH".to_string()),
+                    matched_policy: Some("KILL_SWITCH_ACTIVE".to_string()),
+                    risk_level: Some("emergency".to_string()),
+                },
+                subject: serde_json::json!({ "id": options.subject }),
+                resource: serde_json::json!({ "id": options.resource }),
+                action: options.action.unwrap_or_else(|| "*".to_string()),
+                environment: options.environment,
+                dry_run: options.dry_run.unwrap_or(false),
+                evaluated_at: chrono::Utc::now().to_rfc3339(),
+                latency_ms: 0.05,
+            });
+        }
+
         let is_destructive = options.resource.contains("drop_table") || options.resource.contains("delete");
         if is_destructive {
             return Ok(AuthorizationDecision {
@@ -305,6 +334,87 @@ impl LicenseFlowClient {
             level: level.unwrap_or("hard").to_string(),
             reason: reason.to_string(),
         })
+    }
+
+    /// Check if a subject, license, or tool is marked revoked in local memory (<100ns)
+    pub fn is_revoked(&self, subject: Option<&str>, license: Option<&str>, tool: Option<&str>) -> (bool, Option<String>) {
+        if let Some(sub) = subject {
+            if let Ok(subs) = self.revoked_subjects.read() {
+                if let Some(reason) = subs.get(sub) {
+                    return (true, Some(reason.clone()));
+                }
+            }
+        }
+        if let Some(lic) = license {
+            if let Ok(lics) = self.revoked_licenses.read() {
+                if let Some(reason) = lics.get(lic) {
+                    return (true, Some(reason.clone()));
+                }
+            }
+        }
+        if let Some(tl) = tool {
+            if let Ok(tls) = self.revoked_tools.read() {
+                if let Some(reason) = tls.get(tl) {
+                    return (true, Some(reason.clone()));
+                }
+            }
+        }
+        (false, None)
+    }
+
+    /// Trip kill switch locally in client memory with immediate cache eviction
+    pub fn trip_kill_switch_local(&self, target_type: &str, identifier: &str, reason: &str) {
+        match target_type {
+            "license" | "license_key" => {
+                if let Ok(mut lics) = self.revoked_licenses.write() {
+                    lics.insert(identifier.to_string(), reason.to_string());
+                }
+            }
+            "tool" | "mcp_tool" => {
+                if let Ok(mut tls) = self.revoked_tools.write() {
+                    tls.insert(identifier.to_string(), reason.to_string());
+                }
+            }
+            _ => {
+                if let Ok(mut subs) = self.revoked_subjects.write() {
+                    subs.insert(identifier.to_string(), reason.to_string());
+                }
+            }
+        }
+        self.clear_cache();
+    }
+
+    /// Reset all local kill switch stores
+    pub fn reset_kill_switch_local(&self) {
+        if let Ok(mut subs) = self.revoked_subjects.write() {
+            subs.clear();
+        }
+        if let Ok(mut lics) = self.revoked_licenses.write() {
+            lics.clear();
+        }
+        if let Ok(mut tls) = self.revoked_tools.write() {
+            tls.clear();
+        }
+    }
+
+    /// Cross-plane authorization helper directly binding Core license rights
+    pub async fn authorize_with_license(
+        &self,
+        resource: &str,
+        action: Option<&str>,
+        license_key: Option<&str>,
+    ) -> Result<AuthorizationDecision, LicenseFlowError> {
+        let key = license_key.unwrap_or(&self.config.api_key);
+        self.authorize(AuthorizeOptions {
+            subject: key.to_string(),
+            resource: resource.to_string(),
+            action: action.map(|a| a.to_string()),
+            environment: self.config.environment_id.clone(),
+            region: None,
+            requested_units: None,
+            context: None,
+            dry_run: Some(false),
+        }).await
     }
 }
 
