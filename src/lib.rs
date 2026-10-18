@@ -23,6 +23,7 @@
 //! ```
 
 pub mod endpoints;
+pub mod audit_log;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
